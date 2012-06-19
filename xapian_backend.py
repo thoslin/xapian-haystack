@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import warnings
+import mmseg
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -44,7 +45,7 @@ class XHValueRangeProcessor(xapian.ValueRangeProcessor):
     def __init__(self, backend):
         self.backend = backend or SearchBackend()
         xapian.ValueRangeProcessor.__init__(self)
-    
+
     def __call__(self, begin, end):
         """
         Construct a tuple for value range processing.
@@ -91,7 +92,7 @@ class XHExpandDecider(xapian.ExpandDecider):
         """
         Return True if the term should be used for expanding the search
         query, False otherwise.
-        
+
         Currently, we only want to ignore terms beginning with `DOCUMENT_CT_TERM_PREFIX`
         """
         if term.startswith(DOCUMENT_CT_TERM_PREFIX):
@@ -103,15 +104,15 @@ class SearchBackend(BaseSearchBackend):
     """
     `SearchBackend` defines the Xapian search backend for use with the Haystack
     API for Django search.
-    
+
     It uses the Xapian Python bindings to interface with Xapian, and as
     such is subject to this bug: <http://trac.xapian.org/ticket/364> when
     Django is running with mod_python or mod_wsgi under Apache.
-    
+
     Until this issue has been fixed by Xapian, it is neccessary to set
     `WSGIApplicationGroup to %{GLOBAL}` when using mod_wsgi, or
     `PythonInterpreter main_interpreter` when using mod_python.
-    
+
     In order to use this backend, `HAYSTACK_XAPIAN_PATH` must be set in
     your settings.  This should point to a location where you would your
     indexes to reside.
@@ -119,72 +120,72 @@ class SearchBackend(BaseSearchBackend):
     def __init__(self, site=None, language='english'):
         """
         Instantiates an instance of `SearchBackend`.
-        
+
         Optional arguments:
             `site` -- The site to associate the backend with (default = None)
             `stemming_language` -- The stemming language (default = 'english')
-        
+
         Also sets the stemming language to be used to `stemming_language`.
         """
         super(SearchBackend, self).__init__(site)
-        
+
         if not hasattr(settings, 'HAYSTACK_XAPIAN_PATH'):
             raise ImproperlyConfigured('You must specify a HAYSTACK_XAPIAN_PATH in your settings.')
-        
+
         if not os.path.exists(settings.HAYSTACK_XAPIAN_PATH):
             os.makedirs(settings.HAYSTACK_XAPIAN_PATH)
-        
+
         if not os.access(settings.HAYSTACK_XAPIAN_PATH, os.W_OK):
             raise IOError("The path to your Xapian index '%s' is not writable for the current user/group." % settings.HAYSTACK_XAPIAN_PATH)
-        
+
         self.language = language
         self._schema = None
         self._content_field_name = None
-        
+
     @property
     def schema(self):
         if not self._schema:
-            self._content_field_name, self._schema = self.build_schema(self.site.all_searchfields())            
+            self._content_field_name, self._schema = self.build_schema(self.site.all_searchfields())
         return self._schema
 
     @property
     def content_field_name(self):
         if not self._content_field_name:
-            self._content_field_name, self._schema = self.build_schema(self.site.all_searchfields())            
+            self._content_field_name, self._schema = self.build_schema(self.site.all_searchfields())
         return self._content_field_name
-    
+
     def update(self, index, iterable):
         """
         Updates the `index` with any objects in `iterable` by adding/updating
         the database as needed.
-        
+
         Required arguments:
             `index` -- The `SearchIndex` to process
             `iterable` -- An iterable of model instances to index
-        
+
         For each object in `iterable`, a document is created containing all
-        of the terms extracted from `index.full_prepare(obj)` with field prefixes, 
-        and 'as-is' as needed.  Also, if the field type is 'text' it will be 
+        of the terms extracted from `index.full_prepare(obj)` with field prefixes,
+        and 'as-is' as needed.  Also, if the field type is 'text' it will be
         stemmed and stored with the 'Z' prefix as well.
-        
+
         eg. `content:Testing` ==> `testing, Ztest, ZXCONTENTtest, XCONTENTtest`
-        
+
         Each document also contains an extra term in the format:
-        
+
         `XCONTENTTYPE<app_name>.<model_name>`
-        
+
         As well as a unique identifier in the the format:
-        
+
         `Q<app_name>.<model_name>.<pk>`
-        
+
         eg.: foo.bar (pk=1) ==> `Qfoo.bar.1`, `XCONTENTTYPEfoo.bar`
-        
+
         This is useful for querying for a specific document corresponding to
         a model instance.
-        
+
         The document also contains a pickled version of the object itself and
         the document ID in the document data field.
-        
+
         Finally, we also store field values to be used for sorting data.  We
         store these in the document value slots (position zero is reserver
         for the document ID).  All values are stored as unicode strings with
@@ -195,14 +196,14 @@ class SearchBackend(BaseSearchBackend):
         try:
             for obj in iterable:
                 document = xapian.Document()
-                
+
                 term_generator = xapian.TermGenerator()
                 term_generator.set_database(database)
                 term_generator.set_stemmer(xapian.Stem(self.language))
                 if getattr(settings, 'HAYSTACK_INCLUDE_SPELLING', False) is True:
                     term_generator.set_flags(xapian.TermGenerator.FLAG_SPELLING)
                 term_generator.set_document(document)
-                
+
                 document_id = DOCUMENT_ID_TERM_PREFIX + get_identifier(obj)
                 data = index.full_prepare(obj)
                 weights = index.get_field_weights()
@@ -217,6 +218,10 @@ class SearchBackend(BaseSearchBackend):
                         if field['type'] == 'text':
                             if field['multi_valued'] == 'false':
                                 term = _marshal_term(value)
+
+                                # Segment the term before feeding it to xapian
+                                term = " ".join(mmseg.seg_txt(term.encode("utf-8")))
+
                                 term_generator.index_text(term, weight)
                                 term_generator.index_text(term, weight, prefix)
                                 if len(term.split()) == 1:
